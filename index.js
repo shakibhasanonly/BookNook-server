@@ -218,6 +218,86 @@ async function connectDB() {
       }
     });
 
+    // Get User's Borrowed Books
+    app.get('/borrows', async (req, res) => {
+      try {
+        const db = req.app.locals.db;
+        const userEmail = req.query.email;
+
+        if (!userEmail) {
+          return res.status(400).send({
+            message: 'User email is required',
+          });
+        }
+
+        const borrows = await db
+          .collection('borrows')
+          .find({ userEmail: userEmail })
+          .toArray();
+
+        res.send(borrows);
+      } catch (error) {
+        res.status(500).send({
+          message: 'Failed to get borrowed books',
+        });
+      }
+    });
+
+    // Return a Borrowed Book
+    app.delete('/borrows/:id', async (req, res) => {
+      const db = req.app.locals.db;
+      const borrowId = req.params.id;
+
+      try {
+        if (!ObjectId.isValid(borrowId)) {
+          return res.status(400).send({
+            message: 'Invalid Borrow ID',
+          });
+        }
+
+        const borrow = await db.collection('borrows').findOne({
+          _id: new ObjectId(borrowId),
+        });
+
+        if (!borrow) {
+          return res.status(404).send({
+            message: 'Borrow record not found',
+          });
+        }
+
+        if (!ObjectId.isValid(borrow.bookId)) {
+          return res.status(400).send({
+            message: 'Invalid Book ID',
+          });
+        }
+
+        const bookUpdate = await db
+          .collection('books')
+          .updateOne(
+            { _id: new ObjectId(borrow.bookId) },
+            { $inc: { totalCopies: 1 } },
+          );
+
+        if (bookUpdate.matchedCount === 0) {
+          return res.status(404).send({
+            message: 'Book not found',
+          });
+        }
+
+        await db.collection('borrows').deleteOne({
+          _id: new ObjectId(borrowId),
+        });
+
+        res.send({
+          message: 'Book returned successfully!',
+        });
+      } catch (error) {
+        res.status(500).send({
+          message: 'Failed to return book',
+        });
+      }
+    });
+
     // Start Server
     app.listen(PORT, () => {
       console.log(`BookNook Server running on port ${PORT}`);
