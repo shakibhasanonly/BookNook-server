@@ -182,6 +182,42 @@ async function connectDB() {
       }
     });
 
+    // Borrow a Book
+    app.post('/borrows', async (req, res) => {
+      try {
+        const db = req.app.locals.db;
+
+        const {
+          bookId,
+          bookTitle,
+          bookImage,
+          userEmail,
+          borrowDate,
+          returnDate,
+        } = req.body;
+
+        const newBorrow = {
+          bookId,
+          bookTitle,
+          bookImage,
+          userEmail,
+          borrowDate,
+          returnDate,
+        };
+
+        const result = await db.collection('borrows').insertOne(newBorrow);
+
+        res.status(201).send({
+          message: 'Book borrowed successfully!',
+          insertedId: result.insertedId,
+        });
+      } catch (error) {
+        res.status(500).send({
+          message: 'Failed to borrow book',
+        });
+      }
+    });
+
     // Start Server
     app.listen(PORT, () => {
       console.log(`BookNook Server running on port ${PORT}`);
