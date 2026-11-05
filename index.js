@@ -402,7 +402,18 @@ async function connectDB() {
           });
         }
 
-        // Delete borrow record first
+        // Check whether the book exists before deleting the borrow
+        const book = await booksCollection.findOne({
+          _id: new ObjectId(borrow.bookId),
+        });
+
+        if (!book) {
+          return res.status(404).send({
+            message: 'Book not found. Borrow record was not deleted.',
+          });
+        }
+
+        // Delete borrow record
         const deleteResult = await borrowsCollection.deleteOne({
           _id: new ObjectId(borrowId),
           userEmail: req.user.email,
@@ -415,16 +426,10 @@ async function connectDB() {
         }
 
         // Restore Available Copy
-        const bookUpdate = await booksCollection.updateOne(
+        await booksCollection.updateOne(
           { _id: new ObjectId(borrow.bookId) },
           { $inc: { totalCopies: 1 } },
         );
-
-        if (bookUpdate.matchedCount === 0) {
-          return res.status(404).send({
-            message: 'Book not found',
-          });
-        }
 
         res.send({
           message: 'Book returned successfully!',
