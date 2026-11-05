@@ -140,6 +140,8 @@ async function connectDB() {
           ...req.body,
           userName: req.user.name || '',
           userEmail: req.user.email,
+          addedDate:
+            req.body.addedDate || new Date().toISOString().split('T')[0],
           createdAt: new Date(),
         };
 
