@@ -28,36 +28,23 @@ async function connectDB() {
 
     app.locals.db = db;
 
-    // Test Database Route
-    app.get('/test-db', async (req, res) => {
-      try {
-        const db = req.app.locals.db;
-        const collections = await db.listCollections().toArray();
-
-        res.send({
-          message: 'Database is working!',
-          collections: collections.map(item => item.name),
-        });
-      } catch (error) {
-        res.status(500).send({
-          message: 'Database error',
-        });
-      }
-    });
-
-    // Get All Books
+    // Get All Books (Latest First)
     app.get('/books', async (req, res) => {
       try {
-        const db = req.app.locals.db;
+        const limit = Number(req.query.limit) || 0;
 
-        const books = await db
-          .collection('books')
-          .find()
-          .sort({ createdAt: -1 })
-          .toArray();
+        let query = db.collection('books').find().sort({ createdAt: -1 });
 
-        res.send(books);
+        if (limit > 0) {
+          query = query.limit(limit);
+        }
+
+        const books = await query.toArray();
+
+        res.status(200).send(books);
       } catch (error) {
+        console.error('Get Books Error:', error);
+
         res.status(500).send({
           message: 'Failed to get books',
         });
@@ -67,7 +54,6 @@ async function connectDB() {
     // Get Single Book
     app.get('/books/:id', async (req, res) => {
       try {
-        const db = req.app.locals.db;
         const id = req.params.id;
 
         if (!ObjectId.isValid(id)) {
@@ -86,10 +72,35 @@ async function connectDB() {
           });
         }
 
-        res.send(book);
+        res.status(200).send(book);
       } catch (error) {
+        console.error('Get Single Book Error:', error);
+
         res.status(500).send({
           message: 'Failed to get book',
+        });
+      }
+    });
+
+    // Add New Book
+    app.post('/books', async (req, res) => {
+      try {
+        const newBook = {
+          ...req.body,
+          createdAt: new Date(),
+        };
+
+        const result = await db.collection('books').insertOne(newBook);
+
+        res.status(201).send({
+          message: 'Book added successfully!',
+          insertedId: result.insertedId,
+        });
+      } catch (error) {
+        console.error('Add Book Error:', error);
+
+        res.status(500).send({
+          message: 'Failed to add book',
         });
       }
     });
@@ -97,7 +108,6 @@ async function connectDB() {
     // Update Book
     app.patch('/books/:id', async (req, res) => {
       try {
-        const db = req.app.locals.db;
         const id = req.params.id;
 
         if (!ObjectId.isValid(id)) {
@@ -121,6 +131,8 @@ async function connectDB() {
           modifiedCount: updatedBook.modifiedCount,
         });
       } catch (error) {
+        console.error('Update Book Error:', error);
+
         res.status(500).send({
           message: 'Failed to update book',
         });
@@ -130,7 +142,6 @@ async function connectDB() {
     // Delete Book
     app.delete('/books/:id', async (req, res) => {
       try {
-        const db = req.app.locals.db;
         const id = req.params.id;
 
         if (!ObjectId.isValid(id)) {
@@ -153,31 +164,10 @@ async function connectDB() {
           message: 'Book deleted successfully!',
         });
       } catch (error) {
+        console.error('Delete Book Error:', error);
+
         res.status(500).send({
           message: 'Failed to delete book',
-        });
-      }
-    });
-
-    // Add New Book
-    app.post('/books', async (req, res) => {
-      try {
-        const db = req.app.locals.db;
-
-        const newBook = {
-          ...req.body,
-          createdAt: new Date(),
-        };
-
-        const result = await db.collection('books').insertOne(newBook);
-
-        res.status(201).send({
-          message: 'Book added successfully!',
-          insertedId: result.insertedId,
-        });
-      } catch (error) {
-        res.status(500).send({
-          message: 'Failed to add book',
         });
       }
     });
@@ -185,33 +175,92 @@ async function connectDB() {
     // Borrow a Book
     app.post('/borrows', async (req, res) => {
       try {
-        const db = req.app.locals.db;
+        const { bookId, userEmail, borrowDate, returnDate } = req.body;
 
-        const {
+        // Validate required fields
+        if (!bookId || !userEmail || !borrowDate || !returnDate) {
+          return res.status(400).send({
+            message: 'All required fields must be provided',
+          });
+        }
+
+        if (!ObjectId.isValid(bookId)) {
+          return res.status(400).send({
+            message: 'Invalid Book ID',
+          });
+        }
+
+        // Check existing borrow
+        const existingBorrow = await db.collection('borrows').findOne({
           bookId,
-          bookTitle,
-          bookImage,
           userEmail,
-          borrowDate,
-          returnDate,
-        } = req.body;
+        });
 
+        if (existingBorrow) {
+          return res.status(409).send({
+            message: 'You have already borrowed this book',
+          });
+        }
+
+        // Find book
+        const book = await db.collection('books').findOne({
+          _id: new ObjectId(bookId),
+        });
+
+        if (!book) {
+          return res.status(404).send({
+            message: 'Book not found',
+          });
+        }
+
+        // Decrease available copies
+        const bookUpdate = await db.collection('books').updateOne(
+          {
+            _id: new ObjectId(bookId),
+            totalCopies: { $gt: 0 },
+          },
+          {
+            $inc: { totalCopies: -1 },
+          },
+        );
+
+        if (bookUpdate.modifiedCount === 0) {
+          return res.status(409).send({
+            message: 'Book is not available',
+          });
+        }
+
+        // Create borrow record
         const newBorrow = {
           bookId,
-          bookTitle,
-          bookImage,
+          bookTitle: book.title,
+          bookImage: book.image,
           userEmail,
           borrowDate,
           returnDate,
         };
 
-        const result = await db.collection('borrows').insertOne(newBorrow);
+        try {
+          const result = await db.collection('borrows').insertOne(newBorrow);
 
-        res.status(201).send({
-          message: 'Book borrowed successfully!',
-          insertedId: result.insertedId,
-        });
+          res.status(201).send({
+            message: 'Book borrowed successfully!',
+            insertedId: result.insertedId,
+          });
+        } catch (error) {
+          // Restore copy if borrow record fails
+          await db
+            .collection('books')
+            .updateOne(
+              { _id: new ObjectId(bookId) },
+              { $inc: { totalCopies: 1 } },
+            );
+
+          throw error;
+        }
       } catch (error) {
+        console.error('Borrow Book Error:', error);
+
         res.status(500).send({
           message: 'Failed to borrow book',
         });
@@ -221,7 +270,6 @@ async function connectDB() {
     // Get User's Borrowed Books
     app.get('/borrows', async (req, res) => {
       try {
-        const db = req.app.locals.db;
         const userEmail = req.query.email;
 
         if (!userEmail) {
@@ -232,11 +280,13 @@ async function connectDB() {
 
         const borrows = await db
           .collection('borrows')
-          .find({ userEmail: userEmail })
+          .find({ userEmail })
           .toArray();
 
-        res.send(borrows);
+        res.status(200).send(borrows);
       } catch (error) {
+        console.error('Get Borrows Error:', error);
+
         res.status(500).send({
           message: 'Failed to get borrowed books',
         });
@@ -245,10 +295,9 @@ async function connectDB() {
 
     // Return a Borrowed Book
     app.delete('/borrows/:id', async (req, res) => {
-      const db = req.app.locals.db;
-      const borrowId = req.params.id;
-
       try {
+        const borrowId = req.params.id;
+
         if (!ObjectId.isValid(borrowId)) {
           return res.status(400).send({
             message: 'Invalid Borrow ID',
@@ -292,6 +341,8 @@ async function connectDB() {
           message: 'Book returned successfully!',
         });
       } catch (error) {
+        console.error('Return Book Error:', error);
+
         res.status(500).send({
           message: 'Failed to return book',
         });
