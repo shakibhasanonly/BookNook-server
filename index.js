@@ -8,7 +8,7 @@ const { createRemoteJWKSet, jwtVerify } = require('jose');
 const app = express();
 
 const PORT = process.env.PORT || 5000;
-const AUTH_URL = 'http://localhost:3000';
+const AUTH_URL = process.env.AUTH_URL || 'http://localhost:3000';
 
 const client = new MongoClient(process.env.MONGODB_URI);
 
