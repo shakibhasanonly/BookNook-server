@@ -1,16 +1,58 @@
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
+
 const { MongoClient, ObjectId } = require('mongodb');
+const { createRemoteJWKSet, jwtVerify } = require('jose');
 
 const app = express();
 
 const PORT = process.env.PORT || 5000;
+const AUTH_URL = 'http://localhost:3000';
+
 const client = new MongoClient(process.env.MONGODB_URI);
+
+const JWKS = createRemoteJWKSet(new URL(`${AUTH_URL}/api/auth/jwks`));
 
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Verify JWT Middleware
+const verifyToken = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).send({
+        message: 'Unauthorized access',
+      });
+    }
+
+    const token = authHeader.split(' ')[1];
+
+    const { payload } = await jwtVerify(token, JWKS, {
+      issuer: AUTH_URL,
+      audience: AUTH_URL,
+    });
+
+    if (!payload.email) {
+      return res.status(401).send({
+        message: 'User email not found in token',
+      });
+    }
+
+    req.user = payload;
+
+    next();
+  } catch (error) {
+    console.error('JWT Verification Error:', error.message);
+
+    return res.status(401).send({
+      message: 'Invalid or expired token',
+    });
+  }
+};
 
 // Home Route
 app.get('/', (req, res) => {
@@ -28,12 +70,21 @@ async function connectDB() {
 
     app.locals.db = db;
 
-    // Get All Books (Latest First)
+    const booksCollection = db.collection('books');
+    const borrowsCollection = db.collection('borrows');
+
+    // Prevent duplicate borrow records
+    await borrowsCollection.createIndex(
+      { bookId: 1, userEmail: 1 },
+      { unique: true },
+    );
+
+    // GET All Books (Latest First)
     app.get('/books', async (req, res) => {
       try {
         const limit = Number(req.query.limit) || 0;
 
-        let query = db.collection('books').find().sort({ createdAt: -1 });
+        let query = booksCollection.find().sort({ createdAt: -1 });
 
         if (limit > 0) {
           query = query.limit(limit);
@@ -51,7 +102,7 @@ async function connectDB() {
       }
     });
 
-    // Get Single Book
+    // GET Single Book
     app.get('/books/:id', async (req, res) => {
       try {
         const id = req.params.id;
@@ -62,7 +113,7 @@ async function connectDB() {
           });
         }
 
-        const book = await db.collection('books').findOne({
+        const book = await booksCollection.findOne({
           _id: new ObjectId(id),
         });
 
@@ -82,15 +133,17 @@ async function connectDB() {
       }
     });
 
-    // Add New Book
-    app.post('/books', async (req, res) => {
+    // POST Add New Book
+    app.post('/books', verifyToken, async (req, res) => {
       try {
         const newBook = {
           ...req.body,
+          userName: req.user.name || '',
+          userEmail: req.user.email,
           createdAt: new Date(),
         };
 
-        const result = await db.collection('books').insertOne(newBook);
+        const result = await booksCollection.insertOne(newBook);
 
         res.status(201).send({
           message: 'Book added successfully!',
@@ -105,8 +158,8 @@ async function connectDB() {
       }
     });
 
-    // Update Book
-    app.patch('/books/:id', async (req, res) => {
+    // PATCH Update Book
+    app.patch('/books/:id', verifyToken, async (req, res) => {
       try {
         const id = req.params.id;
 
@@ -116,13 +169,36 @@ async function connectDB() {
           });
         }
 
-        const updatedBook = await db
-          .collection('books')
-          .updateOne({ _id: new ObjectId(id) }, { $set: req.body });
+        const allowedFields = [
+          'title',
+          'author',
+          'category',
+          'image',
+          'description',
+          'totalCopies',
+        ];
+
+        const updateData = {};
+
+        allowedFields.forEach(field => {
+          if (req.body[field] !== undefined) {
+            updateData[field] = req.body[field];
+          }
+        });
+
+        const updatedBook = await booksCollection.updateOne(
+          {
+            _id: new ObjectId(id),
+            userEmail: req.user.email,
+          },
+          {
+            $set: updateData,
+          },
+        );
 
         if (updatedBook.matchedCount === 0) {
           return res.status(404).send({
-            message: 'Book not found',
+            message: 'Book not found or you are not the owner',
           });
         }
 
@@ -139,8 +215,8 @@ async function connectDB() {
       }
     });
 
-    // Delete Book
-    app.delete('/books/:id', async (req, res) => {
+    // DELETE Book
+    app.delete('/books/:id', verifyToken, async (req, res) => {
       try {
         const id = req.params.id;
 
@@ -150,13 +226,14 @@ async function connectDB() {
           });
         }
 
-        const result = await db.collection('books').deleteOne({
+        const result = await booksCollection.deleteOne({
           _id: new ObjectId(id),
+          userEmail: req.user.email,
         });
 
         if (result.deletedCount === 0) {
           return res.status(404).send({
-            message: 'Book not found',
+            message: 'Book not found or you are not the owner',
           });
         }
 
@@ -172,13 +249,16 @@ async function connectDB() {
       }
     });
 
-    // Borrow a Book
-    app.post('/borrows', async (req, res) => {
-      try {
-        const { bookId, userEmail, borrowDate, returnDate } = req.body;
+    // POST Borrow a Book
+    app.post('/borrows', verifyToken, async (req, res) => {
+      let bookId;
 
-        // Validate required fields
-        if (!bookId || !userEmail || !borrowDate || !returnDate) {
+      try {
+        const { borrowDate, returnDate } = req.body;
+
+        bookId = req.body.bookId;
+
+        if (!bookId || !borrowDate || !returnDate) {
           return res.status(400).send({
             message: 'All required fields must be provided',
           });
@@ -190,8 +270,10 @@ async function connectDB() {
           });
         }
 
+        const userEmail = req.user.email;
+
         // Check existing borrow
-        const existingBorrow = await db.collection('borrows').findOne({
+        const existingBorrow = await borrowsCollection.findOne({
           bookId,
           userEmail,
         });
@@ -202,8 +284,8 @@ async function connectDB() {
           });
         }
 
-        // Find book
-        const book = await db.collection('books').findOne({
+        // Find Book
+        const book = await booksCollection.findOne({
           _id: new ObjectId(bookId),
         });
 
@@ -213,8 +295,8 @@ async function connectDB() {
           });
         }
 
-        // Decrease available copies
-        const bookUpdate = await db.collection('books').updateOne(
+        // Decrease Available Copies
+        const bookUpdate = await booksCollection.updateOne(
           {
             _id: new ObjectId(bookId),
             totalCopies: { $gt: 0 },
@@ -230,18 +312,19 @@ async function connectDB() {
           });
         }
 
-        // Create borrow record
+        // Create Borrow Record
         const newBorrow = {
           bookId,
           bookTitle: book.title,
           bookImage: book.image,
+          userName: req.user.name || '',
           userEmail,
           borrowDate,
           returnDate,
         };
 
         try {
-          const result = await db.collection('borrows').insertOne(newBorrow);
+          const result = await borrowsCollection.insertOne(newBorrow);
 
           res.status(201).send({
             message: 'Book borrowed successfully!',
@@ -249,12 +332,16 @@ async function connectDB() {
           });
         } catch (error) {
           // Restore copy if borrow record fails
-          await db
-            .collection('books')
-            .updateOne(
-              { _id: new ObjectId(bookId) },
-              { $inc: { totalCopies: 1 } },
-            );
+          await booksCollection.updateOne(
+            { _id: new ObjectId(bookId) },
+            { $inc: { totalCopies: 1 } },
+          );
+
+          if (error.code === 11000) {
+            return res.status(409).send({
+              message: 'You have already borrowed this book',
+            });
+          }
 
           throw error;
         }
@@ -267,20 +354,11 @@ async function connectDB() {
       }
     });
 
-    // Get User's Borrowed Books
-    app.get('/borrows', async (req, res) => {
+    // GET Logged-in User's Borrowed Books
+    app.get('/borrows', verifyToken, async (req, res) => {
       try {
-        const userEmail = req.query.email;
-
-        if (!userEmail) {
-          return res.status(400).send({
-            message: 'User email is required',
-          });
-        }
-
-        const borrows = await db
-          .collection('borrows')
-          .find({ userEmail })
+        const borrows = await borrowsCollection
+          .find({ userEmail: req.user.email })
           .toArray();
 
         res.status(200).send(borrows);
@@ -293,8 +371,8 @@ async function connectDB() {
       }
     });
 
-    // Return a Borrowed Book
-    app.delete('/borrows/:id', async (req, res) => {
+    // DELETE Return a Borrowed Book
+    app.delete('/borrows/:id', verifyToken, async (req, res) => {
       try {
         const borrowId = req.params.id;
 
@@ -304,8 +382,10 @@ async function connectDB() {
           });
         }
 
-        const borrow = await db.collection('borrows').findOne({
+        // Find only the logged-in user's borrow record
+        const borrow = await borrowsCollection.findOne({
           _id: new ObjectId(borrowId),
+          userEmail: req.user.email,
         });
 
         if (!borrow) {
@@ -320,22 +400,29 @@ async function connectDB() {
           });
         }
 
-        const bookUpdate = await db
-          .collection('books')
-          .updateOne(
-            { _id: new ObjectId(borrow.bookId) },
-            { $inc: { totalCopies: 1 } },
-          );
+        // Delete borrow record first
+        const deleteResult = await borrowsCollection.deleteOne({
+          _id: new ObjectId(borrowId),
+          userEmail: req.user.email,
+        });
+
+        if (deleteResult.deletedCount === 0) {
+          return res.status(404).send({
+            message: 'Borrow record not found',
+          });
+        }
+
+        // Restore Available Copy
+        const bookUpdate = await booksCollection.updateOne(
+          { _id: new ObjectId(borrow.bookId) },
+          { $inc: { totalCopies: 1 } },
+        );
 
         if (bookUpdate.matchedCount === 0) {
           return res.status(404).send({
             message: 'Book not found',
           });
         }
-
-        await db.collection('borrows').deleteOne({
-          _id: new ObjectId(borrowId),
-        });
 
         res.send({
           message: 'Book returned successfully!',
